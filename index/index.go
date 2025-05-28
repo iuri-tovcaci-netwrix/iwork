@@ -166,12 +166,12 @@ func (ix *Index) decodePayload(id uint64, typ uint32, payload []byte) {
 	} else if ix.Type == "key" {
 		value, err = decodeKeynote(typ, payload)
 	} else {
-		fmt.Println("Cannot decode files of type", ix.Type)
+		fmt.Fprintln(os.Stderr, "Cannot decode files of type", ix.Type)
 	}
 
 	if err != nil {
 		// These we don't care as much about
-		fmt.Println("ERR", id, typ, err)
+		fmt.Fprintln(os.Stderr, "ERR", id, typ, err)
 		return
 	}
 

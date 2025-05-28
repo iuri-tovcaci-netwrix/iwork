@@ -1,5 +1,8 @@
 package main
 
+/*
+#include <stdlib.h>
+*/
 import (
 	"archive/zip"
 	"bytes"
@@ -15,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/dunhamsteve/iwork/index"
@@ -356,7 +358,7 @@ func (ctx *Context) storageToNode(bs *TSWP.StorageArchive, body *html.Node) erro
 				}
 				if ce > end {
 					if e.Object != nil {
-						fmt.Println("ERR? ce > end", ce, end, e.Object)
+						fmt.Fprintln(os.Stderr, "ERR? ce > end", ce, end, e.Object)
 					}
 					ce = end
 				}
@@ -405,39 +407,37 @@ func (ctx *Context) storageToNode(bs *TSWP.StorageArchive, body *html.Node) erro
 type Style map[string]interface{}
 
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Printf(`Converts pages files to html
+	if len(os.Args) < 2 {
+		fmt.Printf(`Converts iWork files to JSON. Outputs to stdout.
 
 Usage:
-    %s infile.pages outfile.html
+    %s infile.pages
 
 `, os.Args[0])
 		return
 	}
 
-	if err := Convert(os.Args[1], os.Args[2]); err != nil {
+	out, err := Convert(os.Args[1])
+	if err != nil {
 		panic(err)
 	}
+	fmt.Println(out)
 }
 
-func Convert(in, out string) error {
-	fmt.Println("Processing", in)
-
+func Convert(in string) (string, error) {
 	var err error
 	var ctx Context
 	ctx.styles = make(map[string]string)
 	ctx.imgs = make(map[string]uint64)
 	if ctx.ix, err = index.Open(in); err != nil {
-		return err
+		return "", err
 	}
 	if ctx.zr, err = zip.OpenReader(in); err != nil {
-		return err
+		return "", err
 	}
 	defer ctx.zr.Close()
 
-	fmt.Println("Read", len(ctx.ix.Records), "records")
-
-	var doc *html.Node
+	var doc *html.Node = nil
 	switch ctx.ix.Type {
 	case "pages":
 		doc = ctx.processPages()
@@ -445,26 +445,23 @@ func Convert(in, out string) error {
 		doc = ctx.processNumbers()
 	case "key":
 		doc = ctx.processKeynote()
+	default:
+		doc = nil
+		return "", fmt.Errorf("Unknown file type %s", ctx.ix.Type)
+	}
+	if doc == nil {
+		return "", fmt.Errorf("Unknown file type %s", ctx.ix.Type)
+	} else {
+		fmt.Fprintln(os.Stderr, doc.Namespace)
 	}
 
-	w, err := os.Create(out)
+	var buf bytes.Buffer
+	out, err := json.MarshalIndent(ctx.ix, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer w.Close()
-	fmt.Println("Writing", out)
-	if strings.HasSuffix(out, ".json") {
-		out, err := json.MarshalIndent(ctx.ix, "", "  ")
-		if err != nil {
-			return err
-		}
-		if _, err = w.Write(out); err != nil {
-			return err
-		}
-	} else {
-		html.Render(w, doc)
-	}
-	return nil
+	buf.Write(out)
+	return buf.String(), nil
 }
 
 func (ctx *Context) renderImgData() *html.Node {
@@ -501,7 +498,7 @@ func (ctx *Context) processPages() *html.Node {
 
 	fda := ctx.ix.Deref(da.FloatingDrawables).(*TP.FloatingDrawablesArchive)
 	if len(fda.PageGroups) != 0 {
-		fmt.Println(`WARNING - 
+		fmt.Fprintln(os.Stderr, `WARNING - 
             This document has floating drawables (e.g. floating images/tables/text blocks) which we don't handle in HTML
             conversion.
             
@@ -697,7 +694,7 @@ func translateParaProps(props *TSWP.ParagraphStylePropertiesArchive) string {
 func writejson(foo interface{}, fn string) {
 	a, err := json.MarshalIndent(foo, "", "  ")
 	if err != nil {
-		fmt.Println(err.Error())
+		fmt.Fprintln(os.Stderr, err.Error())
 	}
 	ioutil.WriteFile(fn, a, 0644)
 }
@@ -705,7 +702,7 @@ func writejson(foo interface{}, fn string) {
 func dumpjson(foo interface{}) {
 	a, err := json.MarshalIndent(foo, "", "  ")
 	if err != nil {
-		fmt.Println(err.Error())
+		fmt.Fprintln(os.Stderr, err.Error())
 	}
 	fmt.Println(string(a))
 }

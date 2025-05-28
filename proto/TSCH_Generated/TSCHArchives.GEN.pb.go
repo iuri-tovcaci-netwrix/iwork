@@ -27,7 +27,6 @@ import "github.com/dunhamsteve/iwork/proto/TSK"
 import "github.com/dunhamsteve/iwork/proto/TSD"
 
 // discarding unused import TSS "TSSArchives.pb"
-import "github.com/dunhamsteve/iwork/proto/TSCH1"
 import "github.com/dunhamsteve/iwork/proto/TSCH"
 
 // Reference imports to suppress errors if they are not otherwise used.
