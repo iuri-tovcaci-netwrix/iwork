@@ -42,6 +42,10 @@ func Open(doc string) (*Index, error) {
 		defer zf.Close()
 		ix := &Index{indexType, nil}
 		err = ix.loadZip(zf)
+		// If type wasn't auto-detected and we have a fallback from extension, use it
+		if ix.Type == "" && indexType != "" {
+			ix.Type = indexType
+		}
 
 		return ix, err
 	}
@@ -55,6 +59,10 @@ func Open(doc string) (*Index, error) {
 			defer db.Close()
 			ix := &Index{indexType, nil}
 			err = ix.loadSQL(db)
+			// If type wasn't auto-detected and we have a fallback from extension, use it
+			if ix.Type == "" && indexType != "" {
+				ix.Type = indexType
+			}
 			return ix, err
 		}
 	}
@@ -159,19 +167,56 @@ func (ix *Index) loadIWA(data []byte) error {
 func (ix *Index) decodePayload(id uint64, typ uint32, payload []byte) {
 	var value interface{}
 	var err error
+
+	// If type is already known, use it directly
 	if ix.Type == "pages" {
 		value, err = decodePages(typ, payload)
+		if err == nil {
+			ix.Records[id] = value
+			return
+		}
 	} else if ix.Type == "numbers" {
 		value, err = decodeNumbers(typ, payload)
+		if err == nil {
+			ix.Records[id] = value
+			return
+		}
 	} else if ix.Type == "key" {
 		value, err = decodeKeynote(typ, payload)
-	} else {
-		fmt.Fprintln(os.Stderr, "Cannot decode files of type", ix.Type)
+		if err == nil {
+			ix.Records[id] = value
+			return
+		}
 	}
 
-	if err != nil {
-		// These we don't care as much about
-		fmt.Fprintln(os.Stderr, "ERR", id, typ, err)
+	// Auto-detect file type by trying each decoder
+	if ix.Type == "" || err != nil {
+		// Try Pages first
+		value, err = decodePages(typ, payload)
+		if err == nil {
+			ix.Type = "pages"
+			ix.Records[id] = value
+			return
+		}
+
+		// Try Numbers
+		value, err = decodeNumbers(typ, payload)
+		if err == nil {
+			ix.Type = "numbers"
+			ix.Records[id] = value
+			return
+		}
+
+		// Try Keynote
+		value, err = decodeKeynote(typ, payload)
+		if err == nil {
+			ix.Type = "key"
+			ix.Records[id] = value
+			return
+		}
+
+		// All decoders failed
+		fmt.Fprintln(os.Stderr, "Cannot decode type", typ)
 		return
 	}
 
