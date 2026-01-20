@@ -406,9 +406,15 @@ func (ctx *Context) storageToNode(bs *TSWP.StorageArchive, body *html.Node) erro
 
 type Style map[string]interface{}
 
+// MinimalOutput is the simplified JSON output structure containing only extracted text
+type MinimalOutput struct {
+	Type string   `json:"type"`
+	Text []string `json:"text"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Printf(`Converts iWork files to JSON. Outputs to stdout.
+		fmt.Printf(`Extracts text from iWork files to JSON. Outputs to stdout.
 
 Usage:
     %s infile.pages
@@ -419,49 +425,62 @@ Usage:
 
 	out, err := Convert(os.Args[1])
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	fmt.Println(out)
 }
 
+// extractText extracts all text strings from the parsed iWork records
+func extractText(ix *index.Index) []string {
+	var texts []string
+	seen := make(map[string]bool) // Deduplicate identical strings
+
+	for _, record := range ix.Records {
+		switch v := record.(type) {
+		case *TSWP.StorageArchive:
+			// Extract from text field (repeated string)
+			for _, t := range v.Text {
+				if t != "" && !seen[t] {
+					seen[t] = true
+					texts = append(texts, t)
+				}
+			}
+		case *TST.TableDataList:
+			// Extract from entries[].string field
+			for _, entry := range v.Entries {
+				if entry.String_ != nil && *entry.String_ != "" && !seen[*entry.String_] {
+					seen[*entry.String_] = true
+					texts = append(texts, *entry.String_)
+				}
+			}
+		}
+	}
+	return texts
+}
+
 func Convert(in string) (string, error) {
 	var err error
-	var ctx Context
-	ctx.styles = make(map[string]string)
-	ctx.imgs = make(map[string]uint64)
-	if ctx.ix, err = index.Open(in); err != nil {
-		return "", err
-	}
-	if ctx.zr, err = zip.OpenReader(in); err != nil {
-		return "", err
-	}
-	defer ctx.zr.Close()
 
-	var doc *html.Node = nil
-	switch ctx.ix.Type {
-	case "pages":
-		doc = ctx.processPages()
-	case "numbers":
-		doc = ctx.processNumbers()
-	case "key":
-		doc = ctx.processKeynote()
-	default:
-		doc = nil
-		return "", fmt.Errorf("Unknown file type %s", ctx.ix.Type)
-	}
-	if doc == nil {
-		return "", fmt.Errorf("Unknown file type %s", ctx.ix.Type)
-	} else {
-		fmt.Fprintln(os.Stderr, doc.Namespace)
-	}
-
-	var buf bytes.Buffer
-	out, err := json.MarshalIndent(ctx.ix, "", "  ")
+	ix, err := index.Open(in)
 	if err != nil {
 		return "", err
 	}
-	buf.Write(out)
-	return buf.String(), nil
+
+	// Extract only text content
+	texts := extractText(ix)
+
+	// Create minimal output
+	output := MinimalOutput{
+		Type: ix.Type,
+		Text: texts,
+	}
+
+	out, err := json.Marshal(output)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func (ctx *Context) renderImgData() *html.Node {

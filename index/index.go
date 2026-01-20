@@ -11,7 +11,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/dunhamsteve/iwork/proto/TSP"
@@ -31,7 +30,6 @@ type Index struct {
 
 // Open loads a document into an Index structure
 func Open(doc string) (*Index, error) {
-	indexType := strings.TrimSuffix(filepath.Ext(doc)[1:], "-tef")
 	fn := path.Join(doc, "Index.zip")
 	zf, err := zip.OpenReader(fn)
 	if err != nil {
@@ -40,9 +38,13 @@ func Open(doc string) (*Index, error) {
 	}
 	if err == nil {
 		defer zf.Close()
+		// Detect type from content
+		indexType, err := detectTypeFromZip(&zf.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect file type: %w", err)
+		}
 		ix := &Index{indexType, nil}
 		err = ix.loadZip(zf)
-
 		return ix, err
 	}
 
@@ -53,6 +55,10 @@ func Open(doc string) (*Index, error) {
 		db, err := sql.Open("sqlite3", fn)
 		if err == nil {
 			defer db.Close()
+			indexType, err := detectTypeFromSQL(db)
+			if err != nil {
+				return nil, fmt.Errorf("failed to detect file type: %w", err)
+			}
 			ix := &Index{indexType, nil}
 			err = ix.loadSQL(db)
 			return ix, err
@@ -60,6 +66,147 @@ func Open(doc string) (*Index, error) {
 	}
 
 	return nil, err
+}
+
+// detectTypeFromZip probes the zip contents to determine the iWork document type
+func detectTypeFromZip(zr *zip.Reader) (string, error) {
+	typeIDs := make(map[uint32]bool)
+
+	// Find and parse the first .iwa file to collect type IDs
+	for _, f := range zr.File {
+		if strings.HasSuffix(f.Name, ".iwa") {
+			rc, err := f.Open()
+			if err != nil {
+				continue
+			}
+			data, err := ioutil.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				continue
+			}
+
+			// Collect type IDs from this .iwa file
+			ids, err := extractTypeIDs(data)
+			if err != nil {
+				continue
+			}
+			for _, id := range ids {
+				typeIDs[id] = true
+			}
+
+			// Check if we have enough info to determine type
+			if docType := determineTypeFromIDs(typeIDs); docType != "" {
+				return docType, nil
+			}
+		}
+	}
+
+	// Final attempt with all collected IDs
+	if docType := determineTypeFromIDs(typeIDs); docType != "" {
+		return docType, nil
+	}
+
+	return "", errors.New("unable to determine document type from content")
+}
+
+// detectTypeFromSQL probes the SQLite database to determine the iWork document type
+func detectTypeFromSQL(db *sql.DB) (string, error) {
+	typeIDs := make(map[uint32]bool)
+
+	stmt := `select o.class from objects o limit 100`
+	rows, err := db.Query(stmt)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var class uint32
+		if err := rows.Scan(&class); err != nil {
+			continue
+		}
+		typeIDs[class] = true
+	}
+
+	if docType := determineTypeFromIDs(typeIDs); docType != "" {
+		return docType, nil
+	}
+
+	return "", errors.New("unable to determine document type from content")
+}
+
+// extractTypeIDs extracts protobuf type IDs from an .iwa file without fully decoding
+func extractTypeIDs(data []byte) ([]uint32, error) {
+	data, err := unsnap(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []uint32
+	r := bytes.NewBuffer(data)
+	for {
+		l, err := binary.ReadUvarint(r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return ids, err
+		}
+
+		chunk := make([]byte, l)
+		_, err = r.Read(chunk)
+		if err != nil {
+			return ids, err
+		}
+
+		var ai TSP.ArchiveInfo
+		err = proto.Unmarshal(chunk, &ai)
+		if err != nil {
+			return ids, err
+		}
+
+		for _, info := range ai.MessageInfos {
+			ids = append(ids, *info.Type)
+			// Skip the payload
+			payload := make([]byte, *info.Length)
+			r.Read(payload)
+		}
+	}
+	return ids, nil
+}
+
+// determineTypeFromIDs determines document type based on protobuf type IDs
+func determineTypeFromIDs(typeIDs map[uint32]bool) string {
+	// Type ID 10000 = TP.DocumentArchive (Pages-specific)
+	if typeIDs[10000] {
+		return "pages"
+	}
+
+	// Type ID 6001 = TST.DataStore, 6005 = TST.TableDataList (Numbers-specific table types)
+	if typeIDs[6001] || typeIDs[6005] {
+		return "numbers"
+	}
+
+	// Type ID 5 = KN.SlideArchive (Keynote-specific)
+	if typeIDs[5] {
+		return "key"
+	}
+
+	// Secondary checks for Numbers (table-related types 6000-6256)
+	for id := uint32(6000); id <= 6256; id++ {
+		if typeIDs[id] {
+			return "numbers"
+		}
+	}
+
+	// Secondary checks for Keynote (build/transition types 100-148)
+	for id := uint32(100); id <= 148; id++ {
+		if typeIDs[id] {
+			return "key"
+		}
+	}
+
+	return ""
 }
 
 func (ix *Index) loadSQL(db *sql.DB) error {
