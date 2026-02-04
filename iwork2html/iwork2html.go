@@ -431,27 +431,168 @@ Usage:
 	fmt.Println(out)
 }
 
+// extractCellValuesFromTable extracts numeric, date, and boolean values from a table model
+func extractCellValuesFromTable(ix *index.Index, tm *TST.TableModelArchive, seen map[string]bool) []string {
+	var texts []string
+	if tm.DataStore == nil || tm.DataStore.Tiles == nil {
+		return texts
+	}
+	for _, tinfo := range tm.DataStore.Tiles.Tiles {
+		tile := ix.Deref(tinfo.Tile)
+		if tile == nil {
+			continue
+		}
+		t, ok := tile.(*TST.Tile)
+		if !ok {
+			continue
+		}
+		for _, rinfo := range t.RowInfos {
+			// Try new format first (XXX_unrecognized field 6)
+			texts = append(texts, extractFromUnrecognized(rinfo.XXX_unrecognized, seen)...)
+
+			// Also try legacy format from CellStorageBuffer
+			if len(rinfo.CellOffsets) == 0 || len(rinfo.CellStorageBuffer) == 0 {
+				continue
+			}
+			offsets := make([]uint16, len(rinfo.CellOffsets)/2)
+			binary.Read(bytes.NewBuffer(rinfo.CellOffsets), LE, offsets)
+
+			for _, offset := range offsets {
+				if offset == 65535 {
+					continue
+				}
+				if int(offset) >= len(rinfo.CellStorageBuffer) {
+					continue
+				}
+
+				var cellType int
+				if rinfo.CellStorageBuffer[offset] == 4 {
+					cellType = int(rinfo.CellStorageBuffer[offset+1])
+				} else {
+					cellType = int(rinfo.CellStorageBuffer[offset+2])
+				}
+
+				if int(offset)+6 > len(rinfo.CellStorageBuffer) {
+					continue
+				}
+				flags := LE.Uint16(rinfo.CellStorageBuffer[offset+4 : offset+6])
+				o := popcount(flags)*4 + 8 + int(offset)
+
+				if o+8 > len(rinfo.CellStorageBuffer) {
+					continue
+				}
+
+				var value string
+				switch cellType {
+				case 2: // number
+					num := math.Float64frombits(LE.Uint64(rinfo.CellStorageBuffer[o : o+8]))
+					value = fmt.Sprint(num)
+				case 5: // date
+					num := math.Float64frombits(LE.Uint64(rinfo.CellStorageBuffer[o : o+8]))
+					num += 978307200 // Apple to unix epoch
+					tm := time.Unix(int64(num), 0)
+					value = tm.Format(time.RFC3339)
+				case 6: // boolean
+					num := math.Float64frombits(LE.Uint64(rinfo.CellStorageBuffer[o : o+8]))
+					if num == 0 {
+						value = "FALSE"
+					} else {
+						value = "TRUE"
+					}
+				default:
+					continue
+				}
+
+				if value != "" && !seen[value] {
+					seen[value] = true
+					texts = append(texts, value)
+				}
+			}
+		}
+	}
+	return texts
+}
+
+// extractFromUnrecognized parses numeric values from new Numbers format stored in XXX_unrecognized
+func extractFromUnrecognized(data []byte, seen map[string]bool) []string {
+	var texts []string
+	i := 0
+	for i < len(data) {
+		if i >= len(data) {
+			break
+		}
+		tag := data[i]
+		wireType := tag & 0x07
+		fieldNum := tag >> 3
+		i++
+
+		if wireType == 2 { // Length-delimited
+			if i >= len(data) {
+				break
+			}
+			length := int(data[i])
+			i++
+			if i+length > len(data) {
+				break
+			}
+			fieldData := data[i : i+length]
+			i += length
+
+			// Field 6 contains cell data in new format
+			if fieldNum == 6 && len(fieldData) >= 14 {
+				cellType := fieldData[1]
+				if cellType == 2 { // number type
+					val := LE.Uint16(fieldData[12:14])
+					value := fmt.Sprint(val)
+					if !seen[value] {
+						seen[value] = true
+						texts = append(texts, value)
+					}
+				}
+			}
+		} else if wireType == 0 { // Varint
+			for i < len(data) && data[i]&0x80 != 0 {
+				i++
+			}
+			i++
+		} else {
+			break
+		}
+	}
+	return texts
+}
+
 // extractText extracts all text strings from the parsed iWork records
 func extractText(ix *index.Index) []string {
 	var texts []string
-	seen := make(map[string]bool) // Deduplicate identical strings
+	seen := make(map[string]bool)
 
 	for _, record := range ix.Records {
 		switch v := record.(type) {
 		case *TSWP.StorageArchive:
-			// Extract from text field (repeated string)
 			for _, t := range v.Text {
-				if t != "" && !seen[t] {
+				if t != "" && t != "￼" && !seen[t] {
 					seen[t] = true
 					texts = append(texts, t)
 				}
 			}
 		case *TST.TableDataList:
-			// Extract from entries[].string field
 			for _, entry := range v.Entries {
 				if entry.String_ != nil && *entry.String_ != "" && !seen[*entry.String_] {
 					seen[*entry.String_] = true
 					texts = append(texts, *entry.String_)
+				}
+			}
+		case *TST.TableInfoArchive:
+			if v.TableModel != nil {
+				if tm, ok := ix.Deref(v.TableModel).(*TST.TableModelArchive); ok {
+					texts = append(texts, extractCellValuesFromTable(ix, tm, seen)...)
+				}
+			}
+		case *TST.WPTableInfoArchive:
+			if v.Super != nil && v.Super.TableModel != nil {
+				if tm, ok := ix.Deref(v.Super.TableModel).(*TST.TableModelArchive); ok {
+					texts = append(texts, extractCellValuesFromTable(ix, tm, seen)...)
 				}
 			}
 		}
